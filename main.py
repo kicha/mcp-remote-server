@@ -18,7 +18,8 @@ import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+# DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+DB_PATH = "/tmp/expenses.db"
 
 # Points to the categories JSON file — edit that file anytime, no restart needed
 CATEGORIES_PATH = Path(__file__).parent / "categories.json"
