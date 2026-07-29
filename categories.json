@@ -1,0 +1,115 @@
+{
+    "categories": [
+        {
+            "name": "Groceries",
+            "subcategories": [
+                "Fruits & Vegetables",
+                "Dairy",
+                "Staples",
+                "Snacks",
+                "Beverages"
+            ]
+        },
+        {
+            "name": "Dining",
+            "subcategories": [
+                "Restaurant",
+                "Cafe",
+                "Fast Food",
+                "Food Delivery"
+            ]
+        },
+        {
+            "name": "Transportation",
+            "subcategories": [
+                "Cab",
+                "Auto",
+                "Fuel",
+                "Public Transit",
+                "Parking"
+            ]
+        },
+        {
+            "name": "Utilities",
+            "subcategories": [
+                "Electricity",
+                "Water",
+                "Gas",
+                "Internet",
+                "Mobile Recharge"
+            ]
+        },
+        {
+            "name": "Entertainment",
+            "subcategories": [
+                "Movies",
+                "Concerts",
+                "Streaming",
+                "Gaming",
+                "Events"
+            ]
+        },
+        {
+            "name": "Shopping",
+            "subcategories": [
+                "Clothing",
+                "Electronics",
+                "Home Goods",
+                "Personal Care"
+            ]
+        },
+        {
+            "name": "Healthcare",
+            "subcategories": [
+                "Pharmacy",
+                "Doctor Visit",
+                "Insurance",
+                "Lab Tests"
+            ]
+        },
+        {
+            "name": "Rent",
+            "subcategories": [
+                "Monthly Rent",
+                "Maintenance",
+                "Deposit"
+            ]
+        },
+        {
+            "name": "Subscriptions",
+            "subcategories": [
+                "Streaming Service",
+                "Software",
+                "News",
+                "Fitness App"
+            ]
+        },
+        {
+            "name": "Travel",
+            "subcategories": [
+                "Flights",
+                "Hotels",
+                "Local Transport",
+                "Sightseeing"
+            ]
+        },
+        {
+            "name": "Education",
+            "subcategories": [
+                "Course Fees",
+                "Books",
+                "Online Courses",
+                "Certifications"
+            ]
+        },
+        {
+            "name": "Miscellaneous",
+            "subcategories": [
+                "Gifts",
+                "Donations",
+                "Fees & Charges",
+                "Other"
+            ]
+        }
+    ]
+}
