@@ -1,160 +1,168 @@
-# import random
-# from fastmcp import FastMCP
+"""
+Expense tracker MCP server — Supabase Postgres, async version (asyncpg)
 
-# mcp = FastMCP("mcp-demo-server")
+Changes vs. the earlier sync version:
+- All tools are now `async def`, using asyncpg + a shared connection pool
+  instead of opening a new psycopg2 connection per call.
+- date is stored as TEXT (not DATE) and amount is cast to float8 on read.
+  This matches your original SQLite behavior (plain "YYYY-MM-DD" strings,
+  plain floats) and avoids MCP response serialization errors, since raw
+  asyncpg `date`/`Decimal` objects aren't JSON-serializable by default.
+- statement_cache_size=0 is required when pointed at Supabase's
+  TRANSACTION-mode pooler (port 6543) — that pooler doesn't support
+  server-side prepared statements, which asyncpg uses by default.
 
-# @mcp.tool
-# def add(a: int, b: int) -> int:
-#     """Add two numbers."""
-#     return a + b
+DATABASE_URL:
+  Format (transaction pooler — recommended for FastMCP Cloud's short-lived
+  containers):
 
-# @mcp.tool
-# def roll_dice(sides: int = 1) -> list[int]:
-#     """Roll a dice with the given number of sides."""
-#     return [random.randint(1, 6) for _ in range(sides)]
+    
+  postgresql://postgres.xjpndlrmknrxqflpeswl:@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres
+  Where to get the real values: Supabase dashboard -> your project ->
+  "Connect" button -> copy the "Transaction pooler" string, then fill in
+  your database password (Project Settings -> Database -> Reset database
+  password if you don't have it — this is separate from your Supabase
+  account login).
 
-from fastmcp import FastMCP
+  Set this as the DATABASE_URL environment variable in FastMCP Cloud's
+  project settings — do not hardcode it or commit it to git.
+
+  Gotcha: if your password contains special characters (@, :, /, #, etc.),
+  URL-encode them or the connection string will fail to parse.
+"""
+
 import os
-import sqlite3
-from pathlib import Path
+from typing import Optional
 
-# DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
-DB_PATH = "/tmp/expenses.db"
+import asyncpg
+from fastmcp import FastMCP
 
-# Points to the categories JSON file — edit that file anytime, no restart needed
-CATEGORIES_PATH = Path(__file__).parent / "categories.json"
+mcp = FastMCP("expense-tracker")
 
-mcp = FastMCP("ExpenseTracker")
+DATABASE_URL = os.environ["DATABASE_URL"]  # fails fast at startup if unset
 
-
-def init_db():
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS expenses(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                subcategory TEXT DEFAULT '',
-                note TEXT DEFAULT ''
-            )
-        """)
+_pool: Optional[asyncpg.Pool] = None
 
 
-init_db()
-
-
-@mcp.tool()
-def add_expense(date: str, amount: float, category: str, subcategory: str = "", note: str = "") -> dict:
-    """Add a new expense record. Date should be in YYYY-MM-DD format."""
-    with sqlite3.connect(DB_PATH) as c:
-        cur = c.execute(
-            "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?, ?, ?, ?, ?)",
-            (date, amount, category, subcategory, note),
+async def get_pool() -> asyncpg.Pool:
+    global _pool
+    pool = _pool  # work with a local; Pylance narrows locals reliably across awaits, unlike globals
+    if pool is None:
+        pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            statement_cache_size=0,  # required for Supabase transaction-mode pooler
         )
-        return {"status": "ok", "id": cur.lastrowid}
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id SERIAL PRIMARY KEY,
+                    date TEXT NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    category TEXT NOT NULL,
+                    subcategory TEXT DEFAULT '',
+                    note TEXT DEFAULT ''
+                )
+            """)
+        _pool = pool  # write back to the global once, after it's fully initialized
+    return pool
 
 
-@mcp.tool()
-def list_expenses(start_date: str | None = None, end_date: str | None = None, category: str | None = None) -> list:
-    """List expenses, optionally filtered by date range (YYYY-MM-DD) and/or category."""
-    query = "SELECT id, date, amount, category, subcategory, note FROM expenses WHERE 1=1"
-    params = []
-    if start_date:
-        query += " AND date >= ?"
-        params.append(start_date)
-    if end_date:
-        query += " AND date <= ?"
-        params.append(end_date)
-    if category:
-        query += " AND category = ?"
-        params.append(category)
-    query += " ORDER BY date"
-
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(query, params).fetchall()
-
-    return [
-        {"id": r[0], "date": r[1], "amount": r[2], "category": r[3], "subcategory": r[4], "note": r[5]}
-        for r in rows
-    ]
+@mcp.tool
+async def add_expense(amount: float, category: str, date: str, note: str = "", subcategory: str = "") -> dict:
+    """Add a new expense record. Date should be in YYYY-MM-DD format."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        new_id = await conn.fetchval(
+            "INSERT INTO expenses (date, amount, category, subcategory, note) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            date, amount, category, subcategory, note,
+        )
+    return {"status": "ok", "id": new_id}
 
 
-@mcp.tool()
-def delete_expense(expense_id: int) -> dict:
+@mcp.tool
+async def delete_expense(expense_id: int) -> dict:
     """Delete an expense by its id."""
-    with sqlite3.connect(DB_PATH) as c:
-        cur = c.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
-        if cur.rowcount == 0:
-            return {"status": "not_found", "id": expense_id}
-        return {"status": "deleted", "id": expense_id}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM expenses WHERE id = $1", expense_id)
+    deleted = result.split()[-1] != "0"  # asyncpg returns e.g. "DELETE 1"
+    return {"status": "ok", "deleted": deleted}
 
 
-@mcp.tool()
-def edit_expense(
+@mcp.tool
+async def edit_expense(
     expense_id: int,
-    date: str | None = None,
-    amount: float | None = None,
-    category: str | None = None,
-    subcategory: str | None = None,
-    note: str | None  = None,
+    amount: Optional[float] = None,
+    category: Optional[str] = None,
+    date: Optional[str] = None,
+    note: Optional[str] = None,
+    subcategory: Optional[str] = None,
 ) -> dict:
     """Edit fields of an existing expense. Only the fields provided are updated."""
-    fields, params = [], []
-    for col, val in [
-        ("date", date),
-        ("amount", amount),
-        ("category", category),
-        ("subcategory", subcategory),
-        ("note", note),
-    ]:
+    fields, values = [], []
+    for col, val in [("amount", amount), ("category", category), ("date", date),
+                      ("note", note), ("subcategory", subcategory)]:
         if val is not None:
-            fields.append(f"{col} = ?")
-            params.append(val)
-
+            values.append(val)
+            fields.append(f"{col} = ${len(values)}")
     if not fields:
-        return {"status": "no_changes", "id": expense_id}
-
-    params.append(expense_id)
-    with sqlite3.connect(DB_PATH) as c:
-        cur = c.execute(f"UPDATE expenses SET {', '.join(fields)} WHERE id = ?", params)
-        if cur.rowcount == 0:
-            return {"status": "not_found", "id": expense_id}
-        return {"status": "updated", "id": expense_id}
+        return {"status": "noop"}
+    values.append(expense_id)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(f"UPDATE expenses SET {', '.join(fields)} WHERE id = ${len(values)}", *values)
+    return {"status": "ok"}
 
 
-@mcp.tool()
-def summarize_by_category(start_date: str | None = None, end_date: str | None = None) -> list:
-    """Summarize total spend per category, optionally within a date range."""
-    query = "SELECT category, SUM(amount) as total, COUNT(*) as n FROM expenses WHERE 1=1"
-    params = []
+@mcp.tool
+async def list_expenses(category: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
+    """List expenses, optionally filtered by date range (YYYY-MM-DD) and/or category."""
+    conditions, values = [], []
+    if category:
+        values.append(category)
+        conditions.append(f"category = ${len(values)}")
     if start_date:
-        query += " AND date >= ?"
-        params.append(start_date)
+        values.append(start_date)
+        conditions.append(f"date >= ${len(values)}")
     if end_date:
-        query += " AND date <= ?"
-        params.append(end_date)
-    query += " GROUP BY category ORDER BY total DESC"
+        values.append(end_date)
+        conditions.append(f"date <= ${len(values)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(query, params).fetchall()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT id, date, amount::float8 AS amount, category, subcategory, note "
+            f"FROM expenses {where} ORDER BY date",
+            *values,
+        )
+    return [dict(r) for r in rows]
 
-    return [{"category": r[0], "total": r[1], "count": r[2]} for r in rows]
+
+@mcp.tool
+async def summarize_by_category(start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
+    """Summarize total spend per category, optionally within a date range."""
+    conditions, values = [], []
+    if start_date:
+        values.append(start_date)
+        conditions.append(f"date >= ${len(values)}")
+    if end_date:
+        values.append(end_date)
+        conditions.append(f"date <= ${len(values)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT category, SUM(amount)::float8 AS total FROM expenses {where} "
+            f"GROUP BY category ORDER BY total DESC",
+            *values,
+        )
+    return [dict(r) for r in rows]
 
 
-@mcp.resource("expenses://categories")
-def list_categories() -> list:
-    """List all distinct categories currently in use."""
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute("SELECT DISTINCT category FROM expenses ORDER BY category").fetchall()
-    return [r[0] for r in rows]
-
-@mcp.resource("expense://categories", mime_type="application/json")
-def categories():
-    # Read fresh each time so you can edit the file without restarting
-    with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
-        return f.read()
-
-# Start the server
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
